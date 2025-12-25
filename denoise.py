@@ -43,7 +43,7 @@ if __name__ == "__main__":
             
             #### evaluation slice ####
             if args.save:
-                dataset_opt['val_volume_idx'] = 32 # save only the 32th volume
+                dataset_opt['val_volume_idx'] = 8 # save only the 32th volume
                 dataset_opt['val_slice_idx'] = 'all' #save all slices
             ##########################
 
@@ -81,7 +81,7 @@ if __name__ == "__main__":
 
         if not args.save:
             denoised_img = Metrics.tensor2img(visuals['denoised'])  # uint8
-            input_img = Metrics.tensor2img(visuals['Y'])  # uint8
+            input_img = Metrics.tensor2img(visuals['X'])  # uint8
 
             # save img
             Metrics.save_img(

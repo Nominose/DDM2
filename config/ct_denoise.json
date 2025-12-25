@@ -1,0 +1,179 @@
+{
+  "name": "ct_denoise",
+  "phase": "train",
+  "gpu_ids": [
+    0
+  ],
+  "path": {
+    "log": "logs",
+    "tb_logger": "tb_logger",
+    "results": "results",
+    "checkpoint": "checkpoint",
+    "resume_state": null
+  },
+  "datasets": {
+    "train": {
+      "name": "ct",
+      "dataroot": "/host/d/file/fixedCT_static_simulation_train_test_gaussian_local.xlsx",
+      "data_root": "/host/d/file/simulation/",
+      "train_batches": [
+        5
+      ],
+      "val_batches": [
+        5
+      ],
+      "valid_mask": [
+        0,
+        1000
+      ],
+      "slice_range": [
+        30,
+        80
+      ],
+      "phase": "train",
+      "padding": 3,
+      "val_volume_idx": "all",
+      "val_slice_idx": "all",
+      "batch_size": 1,
+      "in_channel": 1,
+      "num_workers": 4,
+      "use_shuffle": true,
+      "image_size": 512,
+      "lr_flip": 0.5,
+      "HU_MIN": 0.0,
+      "HU_MAX": 80.0,
+      "teacher_n2n_root": "/host/d/file/pre/noise2noise/pred_images/",
+      "teacher_n2n_epoch": 78
+    },
+    "val": {
+      "name": "ct",
+      "dataroot": "/host/d/file/fixedCT_static_simulation_train_test_gaussian_local.xlsx",
+      "data_root": "/host/d/file/simulation/",
+      "train_batches": [
+        5
+      ],
+      "val_batches": [
+        5
+      ],
+      "valid_mask": [
+        0,
+        1000
+      ],
+      "slice_range": [
+        30,
+        80
+      ],
+      "phase": "val",
+      "padding": 3,
+      "val_volume_idx": 8,
+      "val_slice_idx": [
+        25
+      ],
+      "batch_size": 1,
+      "in_channel": 1,
+      "num_workers": 0,
+      "image_size": 512,
+      "lr_flip": 0.0,
+      "HU_MIN": 0.0,
+      "HU_MAX": 80.0,
+      "teacher_n2n_root": "/host/d/file/pre/noise2noise/pred_images/",
+      "teacher_n2n_epoch": 78,
+      "data_len": 1
+    }
+  },
+  "model": {
+    "which_model_G": "mri",
+    "finetune_norm": false,
+    "drop_rate": 0.0,
+    "unet": {
+      "in_channel": 1,
+      "out_channel": 1,
+      "inner_channel": 32,
+      "norm_groups": 32,
+      "channel_multiplier": [
+        1,
+        2,
+        4,
+        8,
+        8
+      ],
+      "attn_res": [
+        16
+      ],
+      "res_blocks": 2,
+      "dropout": 0.0,
+      "version": "v1"
+    },
+    "beta_schedule": {
+      "train": {
+        "schedule": "rev_warmup70",
+        "n_timestep": 1000,
+        "linear_start": 5e-05,
+        "linear_end": 0.01
+      },
+      "val": {
+        "schedule": "rev_warmup70",
+        "n_timestep": 1000,
+        "linear_start": 5e-05,
+        "linear_end": 0.01
+      }
+    },
+    "diffusion": {
+      "image_size": 512,
+      "channels": 1,
+      "conditional": true
+    }
+  },
+  "train": {
+    "n_iter": 100000,
+    "val_freq": 1000,
+    "save_checkpoint_freq": 10000,
+    "print_freq": 100,
+    "optimizer": {
+      "type": "adam",
+      "lr": 0.0001
+    },
+    "ema_scheduler": {
+      "step_start_ema": 5000,
+      "update_ema_every": 1,
+      "ema_decay": 0.9999
+    }
+  },
+  "noise_model": {
+    "resume_state": null,
+    "initial_stage_file": "experiments/ct_denoise_teacher/stage2_matched.txt",
+    "drop_rate": 0.0,
+    "unet": {
+      "in_channel": 2,
+      "out_channel": 1,
+      "inner_channel": 32,
+      "norm_groups": 32,
+      "channel_multiplier": [
+        1,
+        2,
+        4,
+        8,
+        8
+      ],
+      "attn_res": [
+        16
+      ],
+      "res_blocks": 2,
+      "dropout": 0.0,
+      "version": "v1"
+    },
+    "beta_schedule": {
+      "linear_start": 5e-05,
+      "linear_end": 0.01
+    },
+    "n_iter": 50000,
+    "val_freq": 2000,
+    "save_checkpoint_freq": 10000,
+    "print_freq": 100,
+    "optimizer": {
+      "type": "adam",
+      "lr": 0.0001
+    }
+  },
+  "stage2_file": "experiments/ct_denoise_teacher/stage2_matched.txt"
+}

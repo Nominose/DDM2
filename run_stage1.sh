@@ -1,1 +1,1 @@
-python3 train_noise_model.py -p train -c config/hardi_150.json
+python3 train_noise_model.py -p train -c config/ct_denoise.json

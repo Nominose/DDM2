@@ -13,6 +13,7 @@ from functools import partial
 from scipy.stats import norm
 import math
 from tqdm import tqdm
+import nibabel as nib
 
 class Object:
     def __init__(self, config):
@@ -27,7 +28,6 @@ def _rev_warmup_beta(linear_start, linear_end, n_timestep, warmup_frac):
     betas[n_timestep - warmup_time:] = np.linspace(
         linear_start, linear_end, warmup_time, dtype=np.float64)
     return betas
-
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-c', '--config', type=str, default='config/sr_sr3_16_128.json',
@@ -52,7 +52,8 @@ Logger.setup_logger(None, opt['path']['log'],
                     'train', level=logging.INFO, screen=True)
 Logger.setup_logger('val', opt['path']['log'], 'val', level=logging.INFO)
 logger = logging.getLogger('base')
-logger.info('[Stage 2] Markov chain state matching!')
+logger.info('[Stage 2] Markov chain state matching (using teacher N2N)!')
+
 # dataset
 for phase, dataset_opt in opt['datasets'].items():
     dataset_opt['initial_stage_file'] = None
@@ -68,10 +69,7 @@ for phase, dataset_opt in opt['datasets'].items():
             val_set, dataset_opt, phase)
 logger.info('Initial Dataset Finished')
 
-# model
-trainer = Model.create_noise_model(opt)
-logger.info('Load Model Finished')
-
+logger.info('Using teacher N2N results from ct_dataset')
 
 #######
 to_torch = partial(torch.tensor, dtype=torch.float32, device='cuda:0')
@@ -87,14 +85,21 @@ sqrt_alphas_cumprod_prev_np = np.sqrt(
 sqrt_alphas_cumprod_prev = to_torch(np.sqrt(
             np.append(1., alphas_cumprod)))
 
-
-trainer.netG.eval()
 idx = 0
 stage_file = open(opt['stage2_file'],'w+')
 for _,  data in tqdm(enumerate(val_loader)):
     idx += 1
-    data = trainer.set_device(data)
-    denoised = trainer.netG.denoise(data)
+    
+    # ====== 修复：从 val_set.samples 获取正确的 volume_idx 和 slice_idx ======
+    volume_idx, slice_idx = val_set.samples[idx - 1]
+    
+    # ====== 修复：直接使用 ct_dataset 加载的 denoised（已处理 slice 偏移）======
+    if 'denoised' not in data:
+        stage_file.write('%d_%d_%d\n' % (volume_idx, slice_idx, 500))
+        continue
+    
+    denoised = data['denoised'].cuda()
+    # ========================================================================
 
     max_lh = -1
     max_t = -1
@@ -103,14 +108,13 @@ for _,  data in tqdm(enumerate(val_loader)):
     prev_diff = 999.
     
     for t in range(sqrt_alphas_cumprod_prev.shape[0]): # linear search with early stopping
-        noise = data['X'] - sqrt_alphas_cumprod_prev[t] * denoised
+        noise = data['X'].cuda() - sqrt_alphas_cumprod_prev[t] * denoised
         noise_mean = torch.mean(noise)
         noise = noise - noise_mean
 
         mu, std = norm.fit(noise.cpu().numpy())
 
         diff = np.abs((1 - sqrt_alphas_cumprod_prev[t]**2).sqrt().cpu().numpy() - std)
-        #print(mu, std, (1 - sqrt_alphas_cumprod_prev[t]**2).sqrt(), diff)
 
         if diff < min_lh:
             min_lh = diff
@@ -135,10 +139,7 @@ for _,  data in tqdm(enumerate(val_loader)):
         
         print(min_t, np.max(result_np), np.min(result_np))
         break
-        
-    volume_idx = (idx - 1) // val_set.raw_data.shape[-2]
-    slice_idx = (idx - 1) % val_set.raw_data.shape[-2]
-    #min_t = 500
+    
     stage_file.write('%d_%d_%d\n' % (volume_idx, slice_idx, min_t))
 
 stage_file.close()

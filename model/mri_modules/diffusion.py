@@ -340,7 +340,10 @@ class GaussianDiffusion(nn.Module):
 
         # Stage 1 inference
         with torch.no_grad():
-            x_start = self.denoise_fn(x_in['condition']).detach()
+            if 'denoised' in x_in and x_in['denoised'] is not None:
+                x_start = x_in['denoised'].detach()
+            else:
+                x_start = self.denoise_fn(x_in['condition']).detach()
 
         [b, c, w, h] = x_start.shape
 
