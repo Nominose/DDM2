@@ -16,20 +16,10 @@
       "name": "ct",
       "dataroot": "/host/d/file/fixedCT_static_simulation_train_test_gaussian_local.xlsx",
       "data_root": "/host/d/file/simulation/",
-      "train_batches": [
-        5
-      ],
-      "val_batches": [
-        5
-      ],
-      "valid_mask": [
-        0,
-        1000
-      ],
-      "slice_range": [
-        30,
-        80
-      ],
+      "train_batches": [5],
+      "val_batches": [5],
+      "valid_mask": [0, 1000],
+      "slice_range": [30, 80],
       "phase": "train",
       "padding": 3,
       "val_volume_idx": "all",
@@ -40,8 +30,11 @@
       "use_shuffle": true,
       "image_size": 512,
       "lr_flip": 0.5,
-      "HU_MIN": 0.0,
-      "HU_MAX": 80.0,
+      "HU_MIN": -1000.0,
+      "HU_MAX": 2000.0,
+      "histogram_equalization": true,
+      "bins_file": "/host/d/file/histogram_equalization/bins.npy",
+      "bins_mapped_file": "/host/d/file/histogram_equalization/bins_mapped.npy",
       "teacher_n2n_root": "/host/d/file/pre/noise2noise/pred_images/",
       "teacher_n2n_epoch": 78
     },
@@ -49,33 +42,24 @@
       "name": "ct",
       "dataroot": "/host/d/file/fixedCT_static_simulation_train_test_gaussian_local.xlsx",
       "data_root": "/host/d/file/simulation/",
-      "train_batches": [
-        5
-      ],
-      "val_batches": [
-        5
-      ],
-      "valid_mask": [
-        0,
-        1000
-      ],
-      "slice_range": [
-        30,
-        80
-      ],
+      "train_batches": [5],
+      "val_batches": [5],
+      "valid_mask": [0, 1000],
+      "slice_range": [30, 80],
       "phase": "val",
       "padding": 3,
       "val_volume_idx": 8,
-      "val_slice_idx": [
-        25
-      ],
+      "val_slice_idx": [25],
       "batch_size": 1,
       "in_channel": 1,
       "num_workers": 0,
       "image_size": 512,
       "lr_flip": 0.0,
-      "HU_MIN": 0.0,
-      "HU_MAX": 80.0,
+      "HU_MIN": -1000.0,
+      "HU_MAX": 2000.0,
+      "histogram_equalization": true,
+      "bins_file": "/host/d/file/histogram_equalization/bins.npy",
+      "bins_mapped_file": "/host/d/file/histogram_equalization/bins_mapped.npy",
       "teacher_n2n_root": "/host/d/file/pre/noise2noise/pred_images/",
       "teacher_n2n_epoch": 78,
       "data_len": 1
@@ -90,16 +74,8 @@
       "out_channel": 1,
       "inner_channel": 32,
       "norm_groups": 32,
-      "channel_multiplier": [
-        1,
-        2,
-        4,
-        8,
-        8
-      ],
-      "attn_res": [
-        16
-      ],
+      "channel_multiplier": [1, 2, 4, 8, 8],
+      "attn_res": [16],
       "res_blocks": 2,
       "dropout": 0.0,
       "version": "v1"
@@ -141,23 +117,15 @@
   },
   "noise_model": {
     "resume_state": null,
-    "initial_stage_file": "experiments/ct_denoise_teacher/stage2_matched.txt",
+    "initial_stage_file": null,
     "drop_rate": 0.0,
     "unet": {
       "in_channel": 2,
       "out_channel": 1,
       "inner_channel": 32,
       "norm_groups": 32,
-      "channel_multiplier": [
-        1,
-        2,
-        4,
-        8,
-        8
-      ],
-      "attn_res": [
-        16
-      ],
+      "channel_multiplier": [1, 2, 4, 8, 8],
+      "attn_res": [16],
       "res_blocks": 2,
       "dropout": 0.0,
       "version": "v1"

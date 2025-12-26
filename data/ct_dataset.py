@@ -1,5 +1,5 @@
 """
-CT Dataset for DDM2 - with auto slice offset detection
+CT Dataset for DDM2 - with histogram equalization and auto slice offset detection
 """
 
 import os
@@ -10,6 +10,21 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 import nibabel as nib
+
+
+def apply_histogram_equalization(img, bins, bins_mapped):
+    """
+    Apply histogram equalization using pre-computed bins mapping.
+    """
+    if bins is None or bins_mapped is None:
+        return img
+    
+    flat_img = img.flatten()
+    bin_indices = np.digitize(flat_img, bins) - 1
+    bin_indices = np.clip(bin_indices, 0, len(bins_mapped) - 1)
+    equalized = bins_mapped[bin_indices]
+    
+    return equalized.reshape(img.shape).astype(np.float32)  # 确保 float32
 
 
 class CTDataset(Dataset):
@@ -30,10 +45,13 @@ class CTDataset(Dataset):
         train_batches=(0, 1, 2, 3, 4),
         val_batches=(5,),
         slice_range=None,
-        HU_MIN=0.0,
-        HU_MAX=80.0,
+        HU_MIN=-1000.0,
+        HU_MAX=2000.0,
         teacher_n2n_root=None,
         teacher_n2n_epoch=78,
+        histogram_equalization=True,
+        bins_file=None,
+        bins_mapped_file=None,
         **kwargs
     ):
         self.phase = phase
@@ -46,6 +64,28 @@ class CTDataset(Dataset):
         self.HU_MAX = HU_MAX
         self.teacher_n2n_root = teacher_n2n_root
         self.teacher_n2n_epoch = teacher_n2n_epoch
+        
+        # Histogram equalization settings
+        self.histogram_equalization = histogram_equalization
+        self.bins = None
+        self.bins_mapped = None
+        
+        if histogram_equalization:
+            if bins_file is not None and bins_mapped_file is not None:
+                if os.path.exists(bins_file) and os.path.exists(bins_mapped_file):
+                    self.bins = np.load(bins_file).astype(np.float32)
+                    self.bins_mapped = np.load(bins_mapped_file).astype(np.float32)
+                    print(f'[{phase}] Histogram equalization enabled:')
+                    print(f'    bins: {bins_file} (shape: {self.bins.shape})')
+                    print(f'    bins_mapped: {bins_mapped_file} (shape: {self.bins_mapped.shape})')
+                else:
+                    print(f'[WARNING] Histogram equalization files not found:')
+                    print(f'    bins_file: {bins_file} (exists: {os.path.exists(bins_file) if bins_file else False})')
+                    print(f'    bins_mapped_file: {bins_mapped_file} (exists: {os.path.exists(bins_mapped_file) if bins_mapped_file else False})')
+                    self.histogram_equalization = False
+            else:
+                print(f'[WARNING] Histogram equalization enabled but no bins files specified, disabled.')
+                self.histogram_equalization = False
 
         assert isinstance(valid_mask, (list, tuple)) and len(valid_mask) == 2
 
@@ -120,6 +160,8 @@ class CTDataset(Dataset):
 
         print(f'[{phase}] CTDataset: pairs={V}, slices={self.num_slices}, samples={len(self.samples)}')
         print(f'[{phase}] Noise slice_range: [{self.slice_start}, {self.slice_end})')
+        print(f'[{phase}] HU range: [{self.HU_MIN}, {self.HU_MAX}]')
+        print(f'[{phase}] Histogram equalization: {self.histogram_equalization}')
         if self.teacher_n2n_root:
             print(f'[{phase}] Using teacher N2N from: {self.teacher_n2n_root}')
 
@@ -292,6 +334,30 @@ class CTDataset(Dataset):
                     results.setdefault(v, {})[s] = t
         return results
 
+    def _preprocess_image(self, img):
+        """
+        Preprocess image: histogram equalization -> HU cutoff -> normalize
+        
+        Args:
+            img: Raw image data (原始 HU 值)
+        
+        Returns:
+            Preprocessed image in [0, 1] range, dtype=float32
+        """
+        # 确保输入是 float32
+        img = img.astype(np.float32)
+        
+        # Step 1: Histogram equalization (在 HU cutoff 之前)
+        if self.histogram_equalization and self.bins is not None:
+            img = apply_histogram_equalization(img, self.bins, self.bins_mapped)
+        
+        # Step 2: HU cutoff and normalization
+        img = np.clip(img, self.HU_MIN, self.HU_MAX)
+        img = (img - self.HU_MIN) / (self.HU_MAX - self.HU_MIN)
+        
+        # 确保输出是 float32
+        return np.clip(img, 0.0, 1.0).astype(np.float32)
+
     def _load_slice(self, nii_path, slice_idx):
         """Load noise slice - adds slice_start offset"""
         nii_path = self._fix_path(nii_path)
@@ -319,8 +385,9 @@ class CTDataset(Dataset):
             return np.zeros((self.data_shape[0], self.data_shape[1]), dtype=np.float32)
 
         img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
-        img = (img - self.HU_MIN) / (self.HU_MAX - self.HU_MIN)
-        return np.clip(img, 0.0, 1.0)
+        
+        # Apply preprocessing (histogram equalization + normalization)
+        return self._preprocess_image(img)
 
     def _get_teacher_n2n_path(self, patient_id, patient_subid):
         if self.teacher_n2n_root is None:
@@ -366,8 +433,9 @@ class CTDataset(Dataset):
             return None
 
         img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
-        img = (img - self.HU_MIN) / (self.HU_MAX - self.HU_MIN)
-        return np.clip(img, 0.0, 1.0)
+        
+        # Apply preprocessing (histogram equalization + normalization)
+        return self._preprocess_image(img)
 
     def __len__(self):
         return len(self.samples)
@@ -402,7 +470,7 @@ class CTDataset(Dataset):
         if has_teacher:
             channels.append(teacher_denoised)
 
-        raw_input = np.stack(channels, axis=-1)
+        raw_input = np.stack(channels, axis=-1).astype(np.float32)  # 确保 float32
         raw_input = self.transforms(raw_input)
 
         if has_teacher:
@@ -410,8 +478,8 @@ class CTDataset(Dataset):
             raw_input = raw_input[:-1, :, :]
 
         ret = {
-            'X': raw_input[[-1], :, :],
-            'condition': raw_input[:-1, :, :]
+            'X': raw_input[[-1], :, :].float(),  # 确保 float32
+            'condition': raw_input[:-1, :, :].float()  # 确保 float32
         }
 
         if self.matched_state is not None:
@@ -424,7 +492,7 @@ class CTDataset(Dataset):
 
         if self.teacher_n2n_root is not None:
             if has_teacher:
-                ret['denoised'] = denoised_tensor
+                ret['denoised'] = denoised_tensor.float()  # 确保 float32
             else:
                 ret['denoised'] = ret['X'].clone()
                 ret['matched_state'] = torch.tensor([1.0])

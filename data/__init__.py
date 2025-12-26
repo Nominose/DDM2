@@ -57,12 +57,16 @@ def create_dataset(dataset_opt, phase, stage2_file=None):
             slice_range=slice_range,
             val_volume_idx=dataset_opt.get('val_volume_idx', 0),
             val_slice_idx=dataset_opt.get('val_slice_idx', 25),
-            HU_MIN=dataset_opt.get('HU_MIN', -1100.0),
-            HU_MAX=dataset_opt.get('HU_MAX', 2200.0),
-            # ====== 新增：导师N2N参数 ======
+            HU_MIN=dataset_opt.get('HU_MIN', -1000.0),
+            HU_MAX=dataset_opt.get('HU_MAX', 2000.0),
+            # ====== 导师N2N参数 ======
             teacher_n2n_root=dataset_opt.get('teacher_n2n_root', None),
             teacher_n2n_epoch=dataset_opt.get('teacher_n2n_epoch', 78),
-            # ===============================
+            # ====== Histogram Equalization 参数 ======
+            histogram_equalization=dataset_opt.get('histogram_equalization', False),
+            bins_file=dataset_opt.get('bins_file', None),
+            bins_mapped_file=dataset_opt.get('bins_mapped_file', None),
+            # =========================================
         )
 
         logger.info(f'CT dataset [{dataset_opt.get("name","ct")}] is created. Size: {len(dataset)}')
