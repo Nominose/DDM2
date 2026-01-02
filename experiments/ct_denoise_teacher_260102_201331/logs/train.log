@@ -1,0 +1,160 @@
+26-01-02 20:13:32.032 - INFO:   name: ct_denoise_teacher
+  phase: train
+  gpu_ids: [0]
+  path:[
+    log: experiments/ct_denoise_teacher_260102_201331/logs
+    tb_logger: experiments/ct_denoise_teacher_260102_201331/tb_logger
+    results: experiments/ct_denoise_teacher_260102_201331/results
+    checkpoint: experiments/ct_denoise_teacher_260102_201331/checkpoint
+    resume_state: None
+    experiments_root: experiments/ct_denoise_teacher_260102_201331
+  ]
+  datasets:[
+    train:[
+      name: ct
+      dataroot: /host/d/file/fixedCT_static_simulation_train_test_gaussian_local.xlsx
+      data_root: /host/d/file/simulation/
+      train_batches: [0, 1, 2, 3, 4]
+      val_batches: [5]
+      valid_mask: [0, 1000]
+      slice_range: [30, 80]
+      phase: train
+      padding: 3
+      val_volume_idx: all
+      val_slice_idx: all
+      batch_size: 1
+      in_channel: 1
+      num_workers: 4
+      use_shuffle: True
+      image_size: 512
+      lr_flip: 0.5
+      HU_MIN: -1000.0
+      HU_MAX: 2000.0
+      histogram_equalization: True
+      bins_file: /host/d/file/histogram_equalization/bins.npy
+      bins_mapped_file: /host/d/file/histogram_equalization/bins_mapped.npy
+      teacher_n2n_root: /host/d/file/pre/noise2noise/pred_images/
+      teacher_n2n_epoch: 78
+      use_random_num: 0
+    ]
+    val:[
+      name: ct
+      dataroot: /host/d/file/fixedCT_static_simulation_train_test_gaussian_local.xlsx
+      data_root: /host/d/file/simulation/
+      train_batches: [0, 1, 2, 3, 4]
+      val_batches: [5]
+      valid_mask: [0, 1000]
+      slice_range: [30, 80]
+      phase: val
+      padding: 3
+      val_volume_idx: 0
+      val_slice_idx: 25
+      batch_size: 1
+      in_channel: 1
+      num_workers: 0
+      image_size: 512
+      lr_flip: 0.0
+      HU_MIN: -1000.0
+      HU_MAX: 2000.0
+      histogram_equalization: True
+      bins_file: /host/d/file/histogram_equalization/bins.npy
+      bins_mapped_file: /host/d/file/histogram_equalization/bins_mapped.npy
+      teacher_n2n_root: /host/d/file/pre/noise2noise/pred_images/
+      teacher_n2n_epoch: 78
+      use_random_num: 0
+      data_len: 3
+    ]
+  ]
+  model:[
+    which_model_G: mri
+    finetune_norm: False
+    drop_rate: 0.0
+    unet:[
+      in_channel: 1
+      out_channel: 1
+      inner_channel: 32
+      norm_groups: 32
+      channel_multiplier: [1, 2, 4, 8, 8]
+      attn_res: [16]
+      res_blocks: 2
+      dropout: 0.0
+      version: v1
+    ]
+    beta_schedule:[
+      train:[
+        schedule: rev_warmup70
+        n_timestep: 1000
+        linear_start: 5e-05
+        linear_end: 0.01
+      ]
+      val:[
+        schedule: rev_warmup70
+        n_timestep: 1000
+        linear_start: 5e-05
+        linear_end: 0.01
+      ]
+    ]
+    diffusion:[
+      image_size: 512
+      channels: 1
+      conditional: True
+    ]
+  ]
+  train:[
+    n_iter: 100000
+    val_freq: 5000
+    save_checkpoint_freq: 10000
+    print_freq: 100
+    optimizer:[
+      type: adam
+      lr: 0.0001
+    ]
+    ema_scheduler:[
+      step_start_ema: 5000
+      update_ema_every: 1
+      ema_decay: 0.9999
+    ]
+  ]
+  noise_model:[
+    resume_state: None
+    initial_stage_file: None
+    drop_rate: 0.0
+    unet:[
+      in_channel: 2
+      out_channel: 1
+      inner_channel: 32
+      norm_groups: 32
+      channel_multiplier: [1, 2, 4, 8, 8]
+      attn_res: [16]
+      res_blocks: 2
+      dropout: 0.0
+      version: v1
+    ]
+    beta_schedule:[
+      linear_start: 5e-05
+      linear_end: 0.01
+    ]
+    n_iter: 50000
+    val_freq: 2000
+    save_checkpoint_freq: 10000
+    print_freq: 100
+    optimizer:[
+      type: adam
+      lr: 0.0001
+    ]
+  ]
+  stage2_file: experiments/ct_denoise_teacher/stage2_matched.txt
+  distributed: False
+
+26-01-02 20:13:32.033 - INFO: Stage 2 file: experiments/ct_denoise_teacher/stage2_matched.txt
+26-01-02 20:13:34.616 - INFO: CT dataset [ct] is created. Size: 3450
+26-01-02 20:13:34.616 - INFO: [DEBUG] train_set: 3450 samples
+26-01-02 20:13:34.617 - INFO: [DEBUG] train_loader: 3450 batches
+26-01-02 20:13:36.100 - INFO: CT dataset [ct] is created. Size: 1
+26-01-02 20:13:36.101 - INFO: [DEBUG] val_set: 1 samples
+26-01-02 20:13:36.101 - INFO: [DEBUG] val_loader: 1 batches
+26-01-02 20:13:36.101 - INFO: Initial Dataset Finished
+26-01-02 20:13:38.146 - INFO: Initialization method [orthogonal]
+26-01-02 20:13:39.058 - INFO: [DDM2] is created.
+26-01-02 20:13:39.059 - INFO: Initial Model Finished
+26-01-02 20:13:39.059 - INFO: Training config: n_iter=100000, val_freq=5000, print_freq=100, save_freq=10000
