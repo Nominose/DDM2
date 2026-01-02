@@ -1,5 +1,17 @@
 """
-CT Dataset for DDM2 - with histogram equalization and auto slice offset detection
+CT Dataset for DDM² - v2
+支持 use_random_num 参数选择噪声实现
+
+数据结构:
+    Excel (200条) → 100 个 N2N pairs
+    ├── 每个 pair 有 random_num=0 和 random_num=1 两个噪声实现
+    ├── Batch 0-4: 84 pairs (训练)
+    └── Batch 5: 16 pairs (验证)
+
+use_random_num 选项:
+    - 'both': 两个都用，N2N 训练时随机选择输入/目标 (默认)
+    - 0: 只用 random_num=0
+    - 1: 只用 random_num=1
 """
 
 import os
@@ -24,10 +36,28 @@ def apply_histogram_equalization(img, bins, bins_mapped):
     bin_indices = np.clip(bin_indices, 0, len(bins_mapped) - 1)
     equalized = bins_mapped[bin_indices]
     
-    return equalized.reshape(img.shape).astype(np.float32)  # 确保 float32
+    return equalized.reshape(img.shape)
 
 
 class CTDataset(Dataset):
+    """
+    CT 图像去噪数据集
+    
+    主要特性:
+    1. 支持 Noise2Noise 训练（使用两个噪声实现互相监督）
+    2. 支持选择使用哪个 random_num
+    3. 支持 histogram equalization
+    4. 支持 teacher N2N denoised 结果
+    5. 自动过滤坏样本
+    """
+
+    # 已知的坏样本 Patient_ID（数据中有 NaN）
+    BAD_PATIENTS = {
+        8527, 10431, 10461, 10536,
+        11638, 11640, 19591, 30597,
+        76624, 102364, 104563, 109021,
+        139437, 148611, 154227, 172147
+    }
 
     def __init__(
         self,
@@ -52,6 +82,7 @@ class CTDataset(Dataset):
         histogram_equalization=True,
         bins_file=None,
         bins_mapped_file=None,
+        use_random_num='both',  # 新增: 'both', 0, 或 1
         **kwargs
     ):
         self.phase = phase
@@ -64,6 +95,7 @@ class CTDataset(Dataset):
         self.HU_MAX = HU_MAX
         self.teacher_n2n_root = teacher_n2n_root
         self.teacher_n2n_epoch = teacher_n2n_epoch
+        self.use_random_num = use_random_num
         
         # Histogram equalization settings
         self.histogram_equalization = histogram_equalization
@@ -73,15 +105,11 @@ class CTDataset(Dataset):
         if histogram_equalization:
             if bins_file is not None and bins_mapped_file is not None:
                 if os.path.exists(bins_file) and os.path.exists(bins_mapped_file):
-                    self.bins = np.load(bins_file).astype(np.float32)
-                    self.bins_mapped = np.load(bins_mapped_file).astype(np.float32)
-                    print(f'[{phase}] Histogram equalization enabled:')
-                    print(f'    bins: {bins_file} (shape: {self.bins.shape})')
-                    print(f'    bins_mapped: {bins_mapped_file} (shape: {self.bins_mapped.shape})')
+                    self.bins = np.load(bins_file)
+                    self.bins_mapped = np.load(bins_mapped_file)
+                    print(f'[{phase}] Histogram equalization enabled')
                 else:
-                    print(f'[WARNING] Histogram equalization files not found:')
-                    print(f'    bins_file: {bins_file} (exists: {os.path.exists(bins_file) if bins_file else False})')
-                    print(f'    bins_mapped_file: {bins_mapped_file} (exists: {os.path.exists(bins_mapped_file) if bins_mapped_file else False})')
+                    print(f'[WARNING] Histogram equalization files not found, disabled.')
                     self.histogram_equalization = False
             else:
                 print(f'[WARNING] Histogram equalization enabled but no bins files specified, disabled.')
@@ -89,55 +117,81 @@ class CTDataset(Dataset):
 
         assert isinstance(valid_mask, (list, tuple)) and len(valid_mask) == 2
 
+        # 读取 Excel
         self.df = pd.read_excel(dataroot)
         target_batches = train_batches if phase == 'train' else val_batches
+        print(f'[DEBUG] Phase: {phase}, target_batches: {target_batches}')
+        print(f'[DEBUG] Original df rows: {len(self.df)}')
         self.df = self.df[self.df['batch'].isin(target_batches)].reset_index(drop=True)
+        print(f'[DEBUG] After batch filter: {len(self.df)} rows')
 
-        self.n2n_pairs = self._build_n2n_pairs(self.df)
+        # 构建 N2N pairs（根据 use_random_num 筛选）
+        self.n2n_pairs = self._build_n2n_pairs()
         self.data_shape = self._infer_shape()
         W, H, S = self.data_shape
 
+        # valid_mask 用于筛选 pairs（通常不需要，保留兼容性）
         v_start = max(int(valid_mask[0]), 0)
-        v_end = min(int(valid_mask[1]), len(self.n2n_pairs))
-        self.n2n_pairs = self.n2n_pairs[v_start:v_end]
-
-        if slice_range is None:
-            self.slice_start, self.slice_end = 0, S
+        v_end = min(int(valid_mask[1]), len(self.n2n_pairs)) if valid_mask[1] <= 100 else len(self.n2n_pairs)
+        # 如果 valid_mask 像 [0, 100] 这样是 slice 范围，就不截取 pairs
+        if valid_mask[1] > len(self.n2n_pairs):
+            # valid_mask 是 slice 范围
+            self.slice_start = max(int(valid_mask[0]), 0)
+            self.slice_end = min(int(valid_mask[1]), S)
         else:
+            # valid_mask 是 pair 范围（旧行为）
+            self.n2n_pairs = self.n2n_pairs[v_start:v_end]
+            self.slice_start, self.slice_end = 0, S
+
+        # slice_range 覆盖 valid_mask
+        if slice_range is not None:
             self.slice_start = max(int(slice_range[0]), 0)
             self.slice_end = min(int(slice_range[1]), S)
+        
         self.num_slices = self.slice_end - self.slice_start
 
         # Auto detect slice offset
         if self.teacher_n2n_root is not None and len(self.n2n_pairs) > 0:
             detected_offset = self._detect_slice_offset()
-            if detected_offset is not None:
-                if detected_offset != self.slice_start:
-                    print(f'[WARNING] Detected offset ({detected_offset}) != config slice_start ({self.slice_start})')
-                    print(f'[WARNING] Consider setting slice_range to [{detected_offset}, {detected_offset + self.num_slices}]')
-                else:
-                    print(f'[OK] Slice offset verified: {self.slice_start}')
+            if detected_offset is not None and detected_offset != self.slice_start:
+                print(f'[WARNING] Detected offset ({detected_offset}) != config slice_start ({self.slice_start})')
 
         V = len(self.n2n_pairs)
-        if val_volume_idx == 'all':
+        
+        # 处理 val_volume_idx
+        if val_volume_idx == 'all' or val_volume_idx == ['all'] or val_volume_idx == ('all',):
             self.val_volume_idx = list(range(V))
         elif isinstance(val_volume_idx, int):
             self.val_volume_idx = [val_volume_idx]
+        elif isinstance(val_volume_idx, (list, tuple)):
+            # 过滤掉非整数
+            self.val_volume_idx = [x for x in val_volume_idx if isinstance(x, int)]
         else:
-            self.val_volume_idx = list(val_volume_idx)
-        self.val_volume_idx = [x for x in self.val_volume_idx if x < V]
+            self.val_volume_idx = list(range(V))
+        self.val_volume_idx = [x for x in self.val_volume_idx if isinstance(x, int) and x < V]
 
-        if val_slice_idx == 'all':
+        # 处理 val_slice_idx
+        if val_slice_idx == 'all' or val_slice_idx == ['all'] or val_slice_idx == ('all',):
             self.val_slice_idx = list(range(self.num_slices))
         elif isinstance(val_slice_idx, int):
             self.val_slice_idx = [val_slice_idx]
+        elif isinstance(val_slice_idx, (list, tuple)):
+            # 过滤掉非整数
+            self.val_slice_idx = [x for x in val_slice_idx if isinstance(x, int)]
         else:
-            self.val_slice_idx = list(val_slice_idx)
-        self.val_slice_idx = [x for x in self.val_slice_idx if x < self.num_slices]
+            self.val_slice_idx = list(range(self.num_slices))
+        self.val_slice_idx = [x for x in self.val_slice_idx if isinstance(x, int) and x < self.num_slices]
+        
+        # 调试输出
+        print(f'[{phase}] val_volume_idx: {self.val_volume_idx[:5]}... (total {len(self.val_volume_idx)})')
+        print(f'[{phase}] val_slice_idx: {self.val_slice_idx[:5]}... (total {len(self.val_slice_idx)})')
+        print(f'[{phase}] n2n_pairs: {V}, num_slices: {self.num_slices}')
 
+        # 构建样本索引
         self.samples = self._build_sample_indices()
         self.matched_state = self._parse_stage2_file(stage2_file) if stage2_file else None
 
+        # 兼容原代码的 raw_data.shape 访问
         self.data_size_before_padding = (W, H, self.num_slices, V)
         
         class FakeRawData:
@@ -145,6 +199,7 @@ class CTDataset(Dataset):
                 self.shape = shape
         self.raw_data = FakeRawData(self.data_size_before_padding)
 
+        # 数据增强
         if phase == 'train':
             self.transforms = transforms.Compose([
                 transforms.ToTensor(),
@@ -158,29 +213,126 @@ class CTDataset(Dataset):
                 transforms.Lambda(lambda t: (t * 2) - 1),
             ])
 
-        print(f'[{phase}] CTDataset: pairs={V}, slices={self.num_slices}, samples={len(self.samples)}')
-        print(f'[{phase}] Noise slice_range: [{self.slice_start}, {self.slice_end})')
-        print(f'[{phase}] HU range: [{self.HU_MIN}, {self.HU_MAX}]')
-        print(f'[{phase}] Histogram equalization: {self.histogram_equalization}')
-        if self.teacher_n2n_root:
-            print(f'[{phase}] Using teacher N2N from: {self.teacher_n2n_root}')
+        # 打印信息
+        random_num_desc = {
+            'both': '两个都用 (N2N)',
+            0: '只用 random_num=0',
+            1: '只用 random_num=1'
+        }.get(use_random_num, str(use_random_num))
+        
+        print(f'[{phase}] CTDataset v2:')
+        print(f'    pairs={V}, slices={self.num_slices}, samples={len(self.samples)}')
+        print(f'    slice_range: [{self.slice_start}, {self.slice_end})')
+        print(f'    use_random_num: {random_num_desc}')
+        print(f'    HU range: [{self.HU_MIN}, {self.HU_MAX}]')
+        print(f'    histogram_equalization: {self.histogram_equalization}')
+
+    def _build_n2n_pairs(self):
+        """
+        构建 N2N pairs
+        
+        根据 use_random_num 参数决定如何构建:
+        - 'both': 每个 pair 包含 noise_0 和 noise_1
+        - 0: 每个 pair 只有 noise_0（用于单独训练或评估）
+        - 1: 每个 pair 只有 noise_1
+        """
+        pairs = []
+        grouped = self.df.groupby(['Patient_ID', 'Patient_subID'])
+        skipped = 0
+        
+        print(f'[DEBUG] _build_n2n_pairs: df has {len(self.df)} rows, {len(grouped)} groups')
+        print(f'[DEBUG] use_random_num = {self.use_random_num}')
+        
+        for (pid, psid), group in grouped:
+            # 跳过坏样本
+            try:
+                pid_int = int(pid)
+            except:
+                pid_int = -1
+            
+            if pid_int in self.BAD_PATIENTS:
+                skipped += 1
+                continue
+            
+            noise_0_rows = group[group['random_num'] == 0]
+            noise_1_rows = group[group['random_num'] == 1]
+            
+            if self.use_random_num == 'both':
+                # 需要两个噪声实现都存在
+                if len(noise_0_rows) > 0 and len(noise_1_rows) > 0:
+                    pairs.append({
+                        'noise_0': noise_0_rows.iloc[0]['noise_file'],
+                        'noise_1': noise_1_rows.iloc[0]['noise_file'],
+                        'gt': noise_0_rows.iloc[0]['ground_truth_file'],
+                        'patient_id': pid,
+                        'patient_subid': psid
+                    })
+            elif self.use_random_num == 0:
+                # 只用 random_num=0
+                if len(noise_0_rows) > 0:
+                    pairs.append({
+                        'noise_0': noise_0_rows.iloc[0]['noise_file'],
+                        'noise_1': noise_0_rows.iloc[0]['noise_file'],  # 复制自己
+                        'gt': noise_0_rows.iloc[0]['ground_truth_file'],
+                        'patient_id': pid,
+                        'patient_subid': psid
+                    })
+            elif self.use_random_num == 1:
+                # 只用 random_num=1
+                if len(noise_1_rows) > 0:
+                    pairs.append({
+                        'noise_0': noise_1_rows.iloc[0]['noise_file'],  # 用 noise_1 填充
+                        'noise_1': noise_1_rows.iloc[0]['noise_file'],
+                        'gt': noise_1_rows.iloc[0]['ground_truth_file'],
+                        'patient_id': pid,
+                        'patient_subid': psid
+                    })
+        
+        print(f'Found {len(pairs)} N2N pairs (skipped {skipped} bad samples)')
+        return pairs
+
+    def _infer_shape(self):
+        """推断数据维度"""
+        default = (512, 512, 100)
+        
+        if len(self.n2n_pairs) == 0:
+            return default
+        
+        path = self._fix_path(self.n2n_pairs[0]['noise_0'])
+        npy_path = self._get_npy_path(path)
+        
+        try:
+            if os.path.exists(npy_path):
+                data = np.load(npy_path, mmap_mode='r')
+                if data.ndim >= 3:
+                    return (data.shape[0], data.shape[1], data.shape[2])
+            elif os.path.exists(path):
+                nii = nib.load(path)
+                return nii.shape[:3]
+        except:
+            pass
+        
+        return default
 
     def _fix_path(self, path):
+        """修复路径前缀"""
         if self.data_root is not None:
             return path.replace('/host/d/file/simulation/', self.data_root)
         return path
 
     def _get_npy_path(self, nii_path):
+        """获取 npy 缓存路径"""
         return nii_path.replace('.nii.gz', '.npy').replace('/simulation/', '/simulation_npy/')
 
     def _teacher_n2n_exists(self, pred_path):
+        """检查 teacher N2N 结果是否存在"""
         if pred_path is None:
             return False
         npy_path = pred_path.replace('.nii.gz', '.npy')
         return os.path.exists(pred_path) or os.path.exists(npy_path)
 
     def _detect_slice_offset(self):
-        """Auto detect slice offset between noise and teacher N2N"""
+        """自动检测 slice offset"""
         for pair in self.n2n_pairs:
             pred_path = self._get_teacher_n2n_path(pair['patient_id'], pair['patient_subid'])
             if not self._teacher_n2n_exists(pred_path):
@@ -192,110 +344,36 @@ class CTDataset(Dataset):
             try:
                 if os.path.exists(npy_noise):
                     noise_data = np.load(npy_noise)
-                elif os.path.exists(noise_path):
-                    noise_data = nib.load(noise_path).get_fdata()
                 else:
-                    continue
+                    nii = nib.load(noise_path)
+                    noise_data = nii.get_fdata()
                 
-                npy_teacher = pred_path.replace('.nii.gz', '.npy')
-                if os.path.exists(npy_teacher):
-                    teacher_data = np.load(npy_teacher)
-                elif os.path.exists(pred_path):
-                    teacher_data = nib.load(pred_path).get_fdata()
+                npy_pred = pred_path.replace('.nii.gz', '.npy')
+                if os.path.exists(npy_pred):
+                    pred_data = np.load(npy_pred)
                 else:
-                    continue
-            except Exception as e:
-                print(f"[WARNING] Failed to load data: {e}")
+                    pred_nii = nib.load(pred_path)
+                    pred_data = pred_nii.get_fdata()
+                
+                noise_slices = noise_data.shape[2] if noise_data.ndim >= 3 else 1
+                pred_slices = pred_data.shape[2] if pred_data.ndim >= 3 else 1
+                
+                if noise_slices > pred_slices:
+                    return noise_slices - pred_slices
+                return 0
+            except:
                 continue
-            
-            noise_norm = np.clip((noise_data - self.HU_MIN) / (self.HU_MAX - self.HU_MIN), 0, 1)
-            teacher_norm = np.clip((teacher_data - self.HU_MIN) / (self.HU_MAX - self.HU_MIN), 0, 1)
-            
-            noise_slices = noise_data.shape[2]
-            teacher_slices = teacher_data.shape[2]
-            
-            print(f"[Slice Detection] Noise: {noise_slices} slices, Teacher: {teacher_slices} slices")
-            
-            best_offset = 0
-            best_corr = -1
-            
-            for offset in range(0, noise_slices - teacher_slices + 1):
-                corrs = []
-                test_slices = [0, teacher_slices//4, teacher_slices//2, 3*teacher_slices//4, min(teacher_slices-1, 49)]
-                for ts in test_slices:
-                    ns = ts + offset
-                    if ns < noise_slices and ts < teacher_slices:
-                        corr = np.corrcoef(noise_norm[:,:,ns].flatten(), teacher_norm[:,:,ts].flatten())[0,1]
-                        if not np.isnan(corr):
-                            corrs.append(corr)
-                
-                if corrs:
-                    mean_corr = np.mean(corrs)
-                    if mean_corr > best_corr:
-                        best_corr = mean_corr
-                        best_offset = offset
-            
-            print(f"[Slice Detection] Best offset: {best_offset}, correlation: {best_corr:.4f}")
-            
-            if best_corr < 0.8:
-                print(f"[WARNING] Low correlation! Slice alignment may be incorrect.")
-            
-            return best_offset
         
         return None
 
-    def _build_n2n_pairs(self, df):
-        bad_patients = {8527, 10431, 10461, 10536, 11638, 11640, 19591, 30597,
-                        76624, 102364, 104563, 109021, 139437, 148611, 154227, 172147}
-        
-        pairs = []
-        grouped = df.groupby(['Patient_ID', 'Patient_subID'])
-        
-        for (pid, psid), g in grouped:
-            try:
-                pid_int = int(pid)
-            except:
-                pid_int = -1
-            
-            if pid_int in bad_patients:
-                continue
-
-            g0 = g[g['random_num'] == 0]
-            g1 = g[g['random_num'] == 1]
-            
-            if len(g0) > 0 and len(g1) > 0:
-                pairs.append({
-                    'noise_0': g0.iloc[0]['noise_file'],
-                    'noise_1': g1.iloc[0]['noise_file'],
-                    'patient_id': pid,
-                    'patient_subid': psid
-                })
-        
-        print(f'Found {len(pairs)} N2N pairs')
-        return pairs
-
-    def _infer_shape(self):
-        default = (512, 512, 100)
-        if len(self.n2n_pairs) == 0:
-            return default
-
-        p = self._fix_path(self.n2n_pairs[0]['noise_0'])
-        npy_path = self._get_npy_path(p)
-        
-        if os.path.exists(npy_path):
-            data = np.load(npy_path, mmap_mode='r')
-            if len(data.shape) >= 3:
-                return (int(data.shape[0]), int(data.shape[1]), int(data.shape[2]))
-        
-        if os.path.exists(p):
-            nii = nib.load(p)
-            if len(nii.shape) >= 3:
-                return (int(nii.shape[0]), int(nii.shape[1]), int(nii.shape[2]))
-        
-        return default
-
     def _build_sample_indices(self):
+        """构建样本索引列表"""
         samples = []
+        
+        print(f'[DEBUG] _build_sample_indices: phase={self.phase}')
+        print(f'[DEBUG] n2n_pairs={len(self.n2n_pairs)}, num_slices={self.num_slices}')
+        print(f'[DEBUG] val_volume_idx={self.val_volume_idx[:5] if len(self.val_volume_idx) > 5 else self.val_volume_idx}...')
+        print(f'[DEBUG] val_slice_idx={self.val_slice_idx[:5] if len(self.val_slice_idx) > 5 else self.val_slice_idx}...')
         
         if self.phase in ('train', 'test'):
             for vol_idx in range(len(self.n2n_pairs)):
@@ -306,22 +384,25 @@ class CTDataset(Dataset):
                         continue
                 
                 for slice_idx in range(self.num_slices):
-                    samples.append((vol_idx, slice_idx))
+                    samples.append({
+                        'pair_idx': vol_idx,
+                        'slice_idx': slice_idx
+                    })
         else:
+            # 验证阶段：不检查 teacher N2N 是否存在
+            # 因为验证只需要用模型去噪，不需要 teacher 结果
             for vol_idx in self.val_volume_idx:
-                if self.teacher_n2n_root is not None:
-                    if vol_idx < len(self.n2n_pairs):
-                        pair = self.n2n_pairs[vol_idx]
-                        pred_path = self._get_teacher_n2n_path(pair['patient_id'], pair['patient_subid'])
-                        if not self._teacher_n2n_exists(pred_path):
-                            continue
-                
                 for slice_idx in self.val_slice_idx:
-                    samples.append((vol_idx, slice_idx))
+                    samples.append({
+                        'pair_idx': vol_idx,
+                        'slice_idx': slice_idx
+                    })
         
+        print(f'[DEBUG] Built {len(samples)} samples')
         return samples
 
     def _parse_stage2_file(self, file_path):
+        """解析 stage2_matched.txt 文件"""
         if file_path is None or not os.path.exists(file_path):
             return None
         
@@ -335,19 +416,8 @@ class CTDataset(Dataset):
         return results
 
     def _preprocess_image(self, img):
-        """
-        Preprocess image: histogram equalization -> HU cutoff -> normalize
-        
-        Args:
-            img: Raw image data (原始 HU 值)
-        
-        Returns:
-            Preprocessed image in [0, 1] range, dtype=float32
-        """
-        # 确保输入是 float32
-        img = img.astype(np.float32)
-        
-        # Step 1: Histogram equalization (在 HU cutoff 之前)
+        """预处理图像: histogram equalization -> HU cutoff -> normalize"""
+        # Step 1: Histogram equalization
         if self.histogram_equalization and self.bins is not None:
             img = apply_histogram_equalization(img, self.bins, self.bins_mapped)
         
@@ -355,15 +425,14 @@ class CTDataset(Dataset):
         img = np.clip(img, self.HU_MIN, self.HU_MAX)
         img = (img - self.HU_MIN) / (self.HU_MAX - self.HU_MIN)
         
-        # 确保输出是 float32
-        return np.clip(img, 0.0, 1.0).astype(np.float32)
+        return np.clip(img, 0.0, 1.0)
 
     def _load_slice(self, nii_path, slice_idx):
-        """Load noise slice - adds slice_start offset"""
+        """加载单个 slice"""
         nii_path = self._fix_path(nii_path)
         npy_path = self._get_npy_path(nii_path)
         
-        # Add offset for noise data
+        # 加上 slice offset
         actual_idx = slice_idx + self.slice_start
         
         if os.path.exists(npy_path):
@@ -386,10 +455,10 @@ class CTDataset(Dataset):
 
         img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # Apply preprocessing (histogram equalization + normalization)
         return self._preprocess_image(img)
 
     def _get_teacher_n2n_path(self, patient_id, patient_subid):
+        """获取 teacher N2N 结果路径"""
         if self.teacher_n2n_root is None:
             return None
         
@@ -406,7 +475,7 @@ class CTDataset(Dataset):
         )
 
     def _load_teacher_denoised(self, patient_id, patient_subid, slice_idx):
-        """Load teacher N2N result - no offset"""
+        """加载 teacher N2N 去噪结果"""
         pred_path = self._get_teacher_n2n_path(patient_id, patient_subid)
         
         if pred_path is None:
@@ -434,19 +503,22 @@ class CTDataset(Dataset):
 
         img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # Apply preprocessing (histogram equalization + normalization)
         return self._preprocess_image(img)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
-        volume_idx, slice_idx = self.samples[index]
+        sample_info = self.samples[index]
+        volume_idx = sample_info['pair_idx']
+        slice_idx = sample_info['slice_idx']
         pair = self.n2n_pairs[volume_idx]
 
+        # 加载噪声图像
         n0 = self._load_slice(pair['noise_0'], slice_idx)
         n1 = self._load_slice(pair['noise_1'], slice_idx)
 
+        # 加载 teacher denoised（如果有）
         teacher_denoised = None
         if self.teacher_n2n_root is not None:
             teacher_denoised = self._load_teacher_denoised(
@@ -455,11 +527,13 @@ class CTDataset(Dataset):
                 slice_idx
             )
 
-        if self.phase == 'train' and random.random() > 0.5:
+        # N2N 训练时随机选择输入/目标
+        if self.use_random_num == 'both' and self.phase == 'train' and random.random() > 0.5:
             input_img, target_img = n1, n0
         else:
             input_img, target_img = n0, n1
 
+        # 构建 condition channels
         if self.padding > 0:
             cond_ch = 2 * self.padding
             channels = [input_img] * cond_ch + [target_img]
@@ -470,7 +544,7 @@ class CTDataset(Dataset):
         if has_teacher:
             channels.append(teacher_denoised)
 
-        raw_input = np.stack(channels, axis=-1).astype(np.float32)  # 确保 float32
+        raw_input = np.stack(channels, axis=-1)
         raw_input = self.transforms(raw_input)
 
         if has_teacher:
@@ -478,28 +552,133 @@ class CTDataset(Dataset):
             raw_input = raw_input[:-1, :, :]
 
         ret = {
-            'X': raw_input[[-1], :, :].float(),  # 确保 float32
-            'condition': raw_input[:-1, :, :].float()  # 确保 float32
+            'X': raw_input[[-1], :, :].float(),           # 确保 float32
+            'condition': raw_input[:-1, :, :].float()     # 确保 float32
         }
 
+        # matched_state
         if self.matched_state is not None:
             if volume_idx in self.matched_state and slice_idx in self.matched_state[volume_idx]:
-                ret['matched_state'] = torch.tensor([float(self.matched_state[volume_idx][slice_idx])])
+                ret['matched_state'] = torch.tensor([float(self.matched_state[volume_idx][slice_idx])], dtype=torch.float32)
             else:
-                ret['matched_state'] = torch.tensor([500.0])
+                ret['matched_state'] = torch.tensor([500.0], dtype=torch.float32)
         else:
-            ret['matched_state'] = torch.tensor([500.0])
+            ret['matched_state'] = torch.tensor([500.0], dtype=torch.float32)
 
+        # teacher denoised
         if self.teacher_n2n_root is not None:
             if has_teacher:
                 ret['denoised'] = denoised_tensor.float()  # 确保 float32
             else:
                 ret['denoised'] = ret['X'].clone()
-                ret['matched_state'] = torch.tensor([1.0])
+                ret['matched_state'] = torch.tensor([1.0], dtype=torch.float32)
 
+        # NaN/Inf 检查
         if torch.isnan(ret['X']).any() or torch.isinf(ret['X']).any():
             ret['X'] = torch.zeros_like(ret['X'])
         if torch.isnan(ret['condition']).any() or torch.isinf(ret['condition']).any():
             ret['condition'] = torch.zeros_like(ret['condition'])
 
         return ret
+
+
+def create_ct_dataloader(opt, phase='train', stage2_file=None):
+    """
+    创建 CT DataLoader 的工厂函数
+    
+    Args:
+        opt: 配置字典，包含 datasets.train 或 datasets.val
+        phase: 'train' 或 'val'
+        stage2_file: stage2_matched.txt 路径
+    
+    Returns:
+        DataLoader
+    """
+    from torch.utils.data import DataLoader
+    
+    dataset_opt = opt['datasets'][phase]
+    
+    dataset = CTDataset(
+        dataroot=dataset_opt['dataroot'],
+        valid_mask=dataset_opt.get('valid_mask', [0, 100]),
+        phase=phase,
+        image_size=dataset_opt.get('image_size', 512),
+        in_channel=dataset_opt.get('in_channel', 1),
+        val_volume_idx=dataset_opt.get('val_volume_idx', 0),
+        val_slice_idx=dataset_opt.get('val_slice_idx', 25),
+        padding=dataset_opt.get('padding', 3),
+        lr_flip=dataset_opt.get('lr_flip', 0.5),
+        stage2_file=stage2_file or opt.get('stage2_file'),
+        data_root=dataset_opt.get('data_root'),
+        train_batches=dataset_opt.get('train_batches', [0, 1, 2, 3, 4]),
+        val_batches=dataset_opt.get('val_batches', [5]),
+        slice_range=dataset_opt.get('slice_range'),
+        HU_MIN=dataset_opt.get('HU_MIN', -1000.0),
+        HU_MAX=dataset_opt.get('HU_MAX', 2000.0),
+        teacher_n2n_root=dataset_opt.get('teacher_n2n_root'),
+        teacher_n2n_epoch=dataset_opt.get('teacher_n2n_epoch', 78),
+        histogram_equalization=dataset_opt.get('histogram_equalization', True),
+        bins_file=dataset_opt.get('bins_file'),
+        bins_mapped_file=dataset_opt.get('bins_mapped_file'),
+        use_random_num=dataset_opt.get('use_random_num', 'both'),
+    )
+    
+    dataloader = DataLoader(
+        dataset,
+        batch_size=dataset_opt.get('batch_size', 1),
+        shuffle=dataset_opt.get('use_shuffle', phase == 'train'),
+        num_workers=dataset_opt.get('num_workers', 0),
+        pin_memory=True,
+        drop_last=phase == 'train'
+    )
+    
+    return dataloader
+
+
+if __name__ == "__main__":
+    # 测试代码
+    print("=" * 60)
+    print("CTDataset v2 测试")
+    print("=" * 60)
+    
+    # 模拟配置
+    test_config = {
+        'datasets': {
+            'train': {
+                'dataroot': '/path/to/excel.xlsx',
+                'valid_mask': [0, 100],
+                'train_batches': [0, 1, 2, 3, 4],
+                'val_batches': [5],
+                'use_random_num': 'both',  # 或 0 或 1
+                'batch_size': 1,
+            },
+            'val': {
+                'dataroot': '/path/to/excel.xlsx',
+                'valid_mask': [0, 100],
+                'train_batches': [0, 1, 2, 3, 4],
+                'val_batches': [5],
+                'use_random_num': 'both',
+                'val_volume_idx': 'all',
+                'val_slice_idx': 'all',
+                'batch_size': 1,
+            }
+        }
+    }
+    
+    print("\n配置示例:")
+    print(f"  use_random_num='both': 两个噪声实现都用 (N2N 训练)")
+    print(f"  use_random_num=0: 只用 random_num=0")
+    print(f"  use_random_num=1: 只用 random_num=1")
+    
+    print("\n使用方法:")
+    print("  from ct_dataset_v2 import CTDataset, create_ct_dataloader")
+    print("  ")
+    print("  # 方法1: 直接创建 Dataset")
+    print("  dataset = CTDataset(")
+    print("      dataroot='path/to/excel.xlsx',")
+    print("      valid_mask=[0, 100],")
+    print("      use_random_num='both',  # 或 0 或 1")
+    print("      ...)")
+    print("  ")
+    print("  # 方法2: 使用工厂函数")
+    print("  train_loader = create_ct_dataloader(config, phase='train')")

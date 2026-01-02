@@ -54,21 +54,19 @@ Logger.setup_logger('val', opt['path']['log'], 'val', level=logging.INFO)
 logger = logging.getLogger('base')
 logger.info('[Stage 2] Markov chain state matching (using teacher N2N)!')
 
-# dataset
+# dataset - 只创建训练集用于 Stage 2 匹配
 for phase, dataset_opt in opt['datasets'].items():
     dataset_opt['initial_stage_file'] = None
-    if phase == 'train' and args.phase != 'val':
+    if phase == 'train':
+        # Stage 2 需要遍历所有训练样本，所以设置 shuffle=False
+        dataset_opt['use_shuffle'] = False
         train_set = Data.create_dataset(dataset_opt, phase)
         train_loader = Data.create_dataloader(
             train_set, dataset_opt, phase)
-    elif phase == 'val':
-        dataset_opt['val_volume_idx'] = 'all'
-        dataset_opt['val_slice_idx'] = 'all'
-        val_set = Data.create_dataset(dataset_opt, phase)
-        val_loader = Data.create_dataloader(
-            val_set, dataset_opt, phase)
-logger.info('Initial Dataset Finished')
+        break  # 只需要训练集
 
+logger.info('Initial Dataset Finished')
+logger.info(f'Total training samples to match: {len(train_set)}')
 logger.info('Using teacher N2N results from ct_dataset')
 
 #######
@@ -87,14 +85,19 @@ sqrt_alphas_cumprod_prev = to_torch(np.sqrt(
 
 idx = 0
 stage_file = open(opt['stage2_file'],'w+')
-for _,  data in tqdm(enumerate(val_loader)):
+
+# ====== 修复：使用 train_loader 而不是 val_loader ======
+for _,  data in tqdm(enumerate(train_loader), total=len(train_loader), desc="Matching"):
     idx += 1
     
-    # ====== 修复：从 val_set.samples 获取正确的 volume_idx 和 slice_idx ======
-    volume_idx, slice_idx = val_set.samples[idx - 1]
+    # ====== 修复：从 train_set.samples 获取正确的 pair_idx 和 slice_idx ======
+    sample_info = train_set.samples[idx - 1]
+    volume_idx = sample_info['pair_idx']
+    slice_idx = sample_info['slice_idx']
     
     # ====== 修复：直接使用 ct_dataset 加载的 denoised（已处理 slice 偏移）======
     if 'denoised' not in data:
+        logger.warning(f'No denoised for volume {volume_idx}, slice {slice_idx}, using default t=500')
         stage_file.write('%d_%d_%d\n' % (volume_idx, slice_idx, 500))
         continue
     
@@ -140,7 +143,9 @@ for _,  data in tqdm(enumerate(val_loader)):
         print(min_t, np.max(result_np), np.min(result_np))
         break
     
-    stage_file.write('%d_%d_%d\n' % (volume_idx, slice_idx, min_t))
+    stage_file.write('%d_%d_%d\n' % (int(volume_idx), int(slice_idx), int(min_t)))
 
 stage_file.close()
+logger.info(f'Stage 2 matching complete! Total samples: {idx}')
+logger.info(f'Output saved to: {opt["stage2_file"]}')
 print('done!')
